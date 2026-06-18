@@ -1,0 +1,9 @@
+{
+  "name": "倉庫 貸出・返却",
+  "short_name": "倉庫貸出",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#EEF0F3",
+  "theme_color": "#14181F",
+  "icons": []
+}
