@@ -62,7 +62,8 @@ export const api = {
   // 物品マスタ（管理者のみ：RLSで保護）
   async upsertItem(item) {
     const row = { item_code: item.item_code, name: item.name, category: item.category,
-      total_qty: Number(item.total_qty), location: item.location, unit: item.unit };
+      total_qty: Number(item.total_qty), location: item.location, unit: item.unit,
+      photo_url: item.photo_url ?? null };
     if (item.id) {
       const { error } = await supabase.from("items").update(row).eq("id", item.id);
       if (error) throw new Error(msg(error));
@@ -78,6 +79,17 @@ export const api = {
   async deleteItem(id) {
     const { error } = await supabase.from("items").delete().eq("id", id);
     if (error) throw new Error(msg(error));
+  },
+
+  // 写真を Storage(item-photos バケット) にアップロードし、公開URLを返す
+  async uploadPhoto(file) {
+    const ext = (file.type.split("/")[1] || "jpg").replace("jpeg", "jpg");
+    const path = `${crypto.randomUUID()}.${ext}`;
+    const { error } = await supabase.storage.from("item-photos")
+      .upload(path, file, { contentType: file.type, upsert: false });
+    if (error) throw new Error(msg(error));
+    const { data } = supabase.storage.from("item-photos").getPublicUrl(path);
+    return data.publicUrl;
   },
 
   // 物品・貸出の変更をリアルタイム購読

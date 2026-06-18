@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import {
   Package, Search, ArrowLeftRight, History, Settings, Plus, Minus, X,
-  AlertTriangle, Check, User, Download, Boxes, Shield, LogOut, Loader2,
+  AlertTriangle, Check, User, Download, Boxes, Shield, LogOut, Loader2, Camera, Trash2,
 } from "lucide-react";
 import { api } from "./api";
 import { supabase } from "./supabaseClient";
@@ -20,6 +20,36 @@ const toCSV = (items) => {
   const esc = (v) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   return [head.join(","), ...items.map((i) => head.map((h) => esc(i[h])).join(","))].join("\n");
 };
+
+// 端末側で画像を縮小（無料のStorage/帯域を節約）
+function compressImage(file, maxSize = 1024, quality = 0.8) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let { width, height } = img;
+      if (width >= height && width > maxSize) { height = Math.round(height * maxSize / width); width = maxSize; }
+      else if (height > maxSize) { width = Math.round(width * maxSize / height); height = maxSize; }
+      const cv = document.createElement("canvas"); cv.width = width; cv.height = height;
+      cv.getContext("2d").drawImage(img, 0, 0, width, height);
+      cv.toBlob((b) => b ? resolve(new File([b], "photo.jpg", { type: "image/jpeg" })) : reject(new Error("画像変換に失敗しました")), "image/jpeg", quality);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("画像を読み込めませんでした")); };
+    img.src = url;
+  });
+}
+
+// 物品サムネイル（写真が無ければプレースホルダ）
+function Thumb({ url, size = 52 }) {
+  return (
+    <div style={{ width: size, height: size, borderRadius: 10, flexShrink: 0, overflow: "hidden",
+      background: "#F1F3F6", border: `1px solid ${C.line}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      {url ? <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+           : <Package size={size * 0.42} color="#B8BFC9" />}
+    </div>
+  );
+}
 
 export default function App() {
   const [session, setSession] = useState(null);
@@ -221,10 +251,10 @@ function Inventory({ filtered, categories, cat, setCat, q, setQ, setSheet }) {
       {filtered.map((i) => {
         const zero = i.stock <= 0;
         return (<div key={i.id} style={sx.card}>
+          <Thumb url={i.photo_url} />
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-              <span style={sx.code}>{i.item_code}</span>{i.category && <span style={sx.tag}>{i.category}</span>}
-            </div>
+              <span style={sx.code}>{i.item_code}</span>{i.category && <span style={sx.tag}>{i.category}</span>}</div>
             <div style={{ fontWeight: 700, fontSize: 15.5, margin: "5px 0 2px" }}>{i.name}</div>
             <div style={{ fontSize: 12, color: C.sub }}>保管: {i.location || "—"}・全{i.total_qty}{i.unit}</div>
           </div>
@@ -296,6 +326,7 @@ function Admin({ items, setSheet, exportCSV }) {
     </div>
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       {items.map((i) => (<div key={i.id} style={{ ...sx.card, padding: "12px 14px" }} onClick={() => setSheet({ type: "item", item: i })}>
+        <Thumb url={i.photo_url} size={40} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", gap: 7, alignItems: "center" }}><span style={sx.code}>{i.item_code}</span><span style={{ fontWeight: 700, fontSize: 14.5 }}>{i.name}</span></div>
           <div style={{ fontSize: 11.5, color: C.sub, marginTop: 3 }}>{i.category || "—"}・{i.location || "—"}</div></div>
@@ -329,6 +360,7 @@ function LendSheet({ item, onClose, onSubmit }) {
       disabled={busy} onClick={async () => { setBusy(true); await onSubmit({ itemId: item.id, qty, dueDate: due, note }); setBusy(false); }}>
       {busy ? <Loader2 className="spin" size={16} /> : <ArrowLeftRight size={17} />} 貸し出す</button>}>
     <div style={{ textAlign: "center", marginBottom: 4 }}>
+      {item.photo_url && <img src={item.photo_url} alt="" style={{ width: 120, height: 120, objectFit: "cover", borderRadius: 14, border: `1px solid ${C.line}`, marginBottom: 8 }} />}
       <div style={{ fontWeight: 800, fontSize: 17 }}>{item.name}</div>
       <div style={{ fontSize: 12.5, color: C.sub, marginTop: 2 }}>{item.item_code}・在庫 {item.stock}{item.unit}</div></div>
     <label style={sx.label}>貸出数量（最大 {item.stock}）</label><Stepper value={qty} setValue={setQty} max={item.stock} />
@@ -350,11 +382,39 @@ function ReturnSheet({ loan, item, onClose, onSubmit }) {
 }
 function ItemSheet({ item, onClose, onSave, onDelete }) {
   const [f, setF] = useState(item || { item_code: "", name: "", category: "", total_qty: 1, location: "", unit: "個" });
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [photoErr, setPhotoErr] = useState("");
+  const fileRef = useRef(null);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  async function onPickPhoto(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setPhotoErr(""); setPhotoBusy(true);
+    try {
+      const small = await compressImage(file);
+      const url = await api.uploadPhoto(small);
+      setF((s) => ({ ...s, photo_url: url }));
+    } catch (err) { setPhotoErr(err.message); }
+    finally { setPhotoBusy(false); if (fileRef.current) fileRef.current.value = ""; }
+  }
   return (<Sheet title={item ? "物品を編集" : "物品を追加"} onClose={onClose}
     foot={<div style={{ display: "flex", gap: 8 }}>
       {item && <button style={{ ...sx.outline, color: C.accent, borderColor: C.accent, padding: 14 }} onClick={() => { if (confirm("削除しますか？")) onDelete(item.id); }}>削除</button>}
       <button style={{ ...sx.primary, flex: 1, justifyContent: "center", display: "flex", padding: 14, fontSize: 15 }} onClick={() => onSave(f)}>保存</button></div>}>
+    <label style={sx.label}>写真</label>
+    <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+      <Thumb url={f.photo_url} size={72} />
+      <div style={{ flex: 1 }}>
+        <button onClick={() => fileRef.current?.click()} disabled={photoBusy}
+          style={{ ...sx.outline, width: "100%", justifyContent: "center", display: "flex", alignItems: "center", gap: 7 }}>
+          {photoBusy ? <Loader2 className="spin" size={15} /> : <Camera size={15} />}{photoBusy ? "アップロード中…" : "写真を撮る / 選ぶ"}</button>
+        {f.photo_url && <button onClick={() => setF((s) => ({ ...s, photo_url: null }))}
+          style={{ ...sx.outline, width: "100%", justifyContent: "center", display: "flex", alignItems: "center", gap: 6, marginTop: 7, color: C.accent, borderColor: "#F0CDD2" }}>
+          <Trash2 size={14} /> 写真を外す</button>}
+        <input ref={fileRef} type="file" accept="image/*" onChange={onPickPhoto} style={{ display: "none" }} />
+      </div>
+    </div>
+    {photoErr && <div style={{ color: C.accent, fontSize: 12, marginTop: 6 }}>{photoErr}</div>}
     {[["item_code", "品番"], ["name", "品名"], ["category", "カテゴリ"], ["location", "保管場所"]].map(([k, lab]) => (
       <React.Fragment key={k}><label style={sx.label}>{lab}</label><input value={f[k] || ""} onChange={set(k)} style={sx.input} /></React.Fragment>))}
     <div style={{ display: "flex", gap: 10 }}>
